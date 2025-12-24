@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import requests
 import streamlit as st
+from pydantic import BaseModel, ConfigDict
 
 # pip install asknews
 from asknews_sdk import AskNewsSDK
