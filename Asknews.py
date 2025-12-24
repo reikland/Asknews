@@ -16,7 +16,7 @@ from asknews_sdk import AskNewsSDK
 
 
 # ============================================================
-# CONFIG — HARD-CODE YOUR KEY HERE (IF YOU INSIST)
+# CONFIG
 # ============================================================
 ASKNEWS_API_KEY = "ank_tIpMbXiY2OSUWCU1RvO9IJkFbqVRUMO5HmNg2AGSjz"  # <- paste your ank_... key here
 
@@ -25,10 +25,7 @@ ASKNEWS_API_KEY = "ank_tIpMbXiY2OSUWCU1RvO9IJkFbqVRUMO5HmNg2AGSjz"  # <- paste y
 # Pydantic models (your canonical internal representations)
 # ============================================================
 class ArticleDoc(BaseModel):
-    """
-    Canonical article representation for topic clustering.
-    This model is populated from AskNews SDK objects via model_validate(..., from_attributes=True).
-    """
+    """Canonical article representation for topic clustering."""
     model_config = ConfigDict(extra="allow")
 
     title: Optional[str] = None
@@ -116,10 +113,7 @@ def tokenize(text: str) -> List[str]:
 
 
 def filtered_kwargs(fn, params: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Filter kwargs by the installed SDK method signature.
-    This makes the app resilient to SDK version changes and reduces 422 errors.
-    """
+    """Filter kwargs by the installed SDK method signature."""
     sig = inspect.signature(fn)
     allowed = set(sig.parameters.keys())
     return {k: v for k, v in params.items() if k in allowed}
@@ -157,18 +151,17 @@ def is_invalid_permissions(e: Exception) -> bool:
 
 
 def normalize_to_items(resp: Any) -> List[Any]:
-    """
-    Return a list of items (articles or stories) without converting to dicts.
-    Works with:
-      - list/tuple
-      - response objects containing .articles / .stories / .results / .data
-      - iterables
-    """
+    """Return items (articles or stories) without converting to dicts."""
     if resp is None:
         return []
 
-    if isinstance(resp, (list, tuple)):
+    if isinstance(resp, tuple):
+        if len(resp) == 2 and isinstance(resp[1], (list, tuple)):
+            return list(resp[1])
         return list(resp)
+
+    if isinstance(resp, list):
+        return resp
 
     for attr in ("articles", "stories", "results", "data", "items"):
         if hasattr(resp, attr):
@@ -319,12 +312,16 @@ def stories_to_topics(stories: Sequence[Any]) -> List[Topic]:
 # NEWS -> Topic clustering (fallback when Stories forbidden)
 # ============================================================
 def validate_articles(raw_items: Sequence[Any]) -> List[ArticleDoc]:
-    """
-    Create ArticleDoc objects directly from SDK items via from_attributes=True.
-    No .get() and no converting the whole dataset to dict as primary representation.
-    """
+    """Create ArticleDoc objects directly from SDK items."""
     docs: List[ArticleDoc] = []
     for item in raw_items:
+        if isinstance(item, tuple) and len(item) == 2:
+            candidate = item[1]
+            if isinstance(candidate, (list, tuple)):
+                for sub in candidate:
+                    docs.extend(validate_articles([sub]))
+                continue
+            item = candidate
         try:
             doc = ArticleDoc.model_validate(item, from_attributes=True)
         except Exception:
