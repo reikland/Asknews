@@ -6,10 +6,11 @@ import json
 import math
 import re
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
 
+import requests
 import streamlit as st
-from pydantic import BaseModel, ConfigDict, Field
 
 # pip install asknews
 from asknews_sdk import AskNewsSDK
@@ -19,15 +20,19 @@ from asknews_sdk import AskNewsSDK
 # CONFIG
 # ============================================================
 ASKNEWS_API_KEY = "ank_tIpMbXiY2OSUWCU1RvO9IJkFbqVRUMO5HmNg2AGSjz"  # <- paste your ank_... key here
+OPENROUTER_API_KEY = "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"
 
 
 # ============================================================
-# Pydantic models (your canonical internal representations)
+# Simple data classes (no external deps)
 # ============================================================
 class ArticleDoc(BaseModel):
     """Canonical article representation for topic clustering."""
     model_config = ConfigDict(extra="allow")
 
+
+@dataclass
+class ArticleDoc:
     title: Optional[str] = None
     headline: Optional[str] = None
     name: Optional[str] = None
@@ -41,7 +46,33 @@ class ArticleDoc(BaseModel):
     url: Optional[str] = None
     link: Optional[str] = None
 
-    published_at: Optional[Any] = None  # keep loose; depends on SDK/version
+    published_at: Optional[Any] = None
+
+    @classmethod
+    def from_any(cls, item: Any) -> "ArticleDoc":
+        if isinstance(item, cls):
+            return item
+
+        data: Dict[str, Any] = {}
+        if isinstance(item, dict):
+            data = item
+        else:
+            for field_name in (
+                "title",
+                "headline",
+                "name",
+                "summary",
+                "snippet",
+                "description",
+                "content",
+                "text",
+                "url",
+                "link",
+                "published_at",
+            ):
+                if hasattr(item, field_name):
+                    data[field_name] = getattr(item, field_name)
+        return cls(**data)
 
     def best_title(self) -> str:
         for v in (self.title, self.headline, self.name):
@@ -68,18 +99,23 @@ class ArticleDoc(BaseModel):
             return f"{t}\n{s}"
         return t or s
 
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
-class Topic(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
+@dataclass
+class Topic:
     topic_id: str
-    mode: str = Field(..., description="stories|news")
+    mode: str
     title: str
     query: str
     summary: str = ""
-    key_takeaways: List[str] = Field(default_factory=list)
-    source_urls: List[str] = Field(default_factory=list)
+    key_takeaways: List[str] = field(default_factory=list)
+    source_urls: List[str] = field(default_factory=list)
     support_count: int = 0
+
+    def model_dump(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 # ============================================================
@@ -140,6 +176,74 @@ def extract_api_error_details(e: Exception) -> Dict[str, Any]:
         except Exception:
             pass
     return out
+
+
+def refine_topics_with_llm(
+    topics: List[Topic],
+    instructions: str,
+    model_name: str,
+    desired_count: int,
+) -> List[Topic]:
+    if not instructions.strip():
+        return topics[:desired_count]
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Tu es un éditeur de sujets d'actualité. Garde les champs JSON: "
+                    "topic_id, mode, title, query, summary, key_takeaways, source_urls, support_count. "
+                    "Renvoie uniquement un tableau JSON compact sans texte additionnel."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Sujets actuels:\n"
+                    f"{json.dumps([t.model_dump() for t in topics], ensure_ascii=False)}\n\n"
+                    f"Instructions de modification: {instructions}\n"
+                    f"Nombre maximum de sujets: {desired_count}."
+                ),
+            },
+        ],
+        "max_tokens": 800,
+        "temperature": 0.4,
+    }
+
+    try:
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        # Extract JSON array from possible markdown fences
+        match = re.search(r"\[.*\]", content, re.DOTALL)
+        json_text = match.group(0) if match else content
+        parsed = json.loads(json_text)
+        refined: List[Topic] = []
+        if isinstance(parsed, list):
+            for item in parsed[:desired_count]:
+                if not isinstance(item, dict):
+                    continue
+                refined.append(
+                    Topic(
+                        topic_id=str(item.get("topic_id") or safe_slug(item.get("title", "topic"))),
+                        mode=str(item.get("mode") or "news"),
+                        title=str(item.get("title") or "Sujet"),
+                        query=str(item.get("query") or ""),
+                        summary=str(item.get("summary") or ""),
+                        key_takeaways=[str(x) for x in item.get("key_takeaways", []) if isinstance(x, str)],
+                        source_urls=[str(x) for x in item.get("source_urls", []) if isinstance(x, str)],
+                        support_count=int(item.get("support_count") or 0),
+                    )
+                )
+        return refined or topics[:desired_count]
+    except Exception:
+        return topics[:desired_count]
 
 
 def is_invalid_permissions(e: Exception) -> bool:
@@ -322,6 +426,7 @@ def validate_articles(raw_items: Sequence[Any]) -> List[ArticleDoc]:
                     docs.extend(validate_articles([sub]))
                 continue
             item = candidate
+        doc = ArticleDoc.from_any(item)
         try:
             doc = ArticleDoc.model_validate(item, from_attributes=True)
         except Exception:
@@ -435,10 +540,10 @@ def topics_from_news_articles(
 
 
 # ============================================================
-# Streamlit UI (English-only)
+# Streamlit UI
 # ============================================================
 st.set_page_config(page_title="AskNews → Topic Generator", layout="wide")
-st.title("AskNews → Topic Generator (Pydantic-first)")
+st.title("AskNews → Topic Generator")
 
 with st.sidebar:
     st.header("Mode")
@@ -446,6 +551,23 @@ with st.sidebar:
         "Topic source",
         options=["AUTO (Stories → News fallback)", "STORIES ONLY", "NEWS ONLY"],
         index=0,
+    )
+
+    st.header("LLM")
+    llm_model = st.selectbox(
+        "Modèle OpenRouter",
+        options=[
+            "openrouter/anthropic/claude-3.5-sonnet",
+            "openrouter/openai/gpt-4o-mini",
+            "mistralai/mixtral-8x7b-instruct",
+        ],
+        index=0,
+    )
+    llm_instructions = st.text_area(
+        "Instructions pour ajuster les sujets (optionnel)",
+        value="",
+        height=120,
+        help="Laisse vide pour conserver les sujets bruts.",
     )
 
     st.divider()
@@ -475,6 +597,7 @@ with st.sidebar:
 
     limit = st.slider("Result limit", 5, 50, 15, 5)
     max_topics = st.slider("Max topics (news clustering)", 5, 25, 12, 1)
+    topic_limit = st.slider("Nombre de sujets à retourner", 3, 25, 12, 1)
 
     show_debug = st.checkbox("Show diagnostics", value=True)
     run = st.button("Generate topics", type="primary")
@@ -592,10 +715,10 @@ if (not topics) and wants_news:
                 # Show a safe minimal representation
                 previews = []
                 for it in news_items[:2]:
-                    try:
-                        doc = ArticleDoc.model_validate(it, from_attributes=True)
+                    doc = ArticleDoc.from_any(it)
+                    if doc.best_title() or doc.best_summary():
                         previews.append(doc.model_dump())
-                    except Exception:
+                    else:
                         previews.append({"repr": repr(it)})
                 st.json(previews)
 
@@ -609,6 +732,20 @@ if (not topics) and wants_news:
         if show_debug:
             st.json(diagnostics["news_error"])
         st.stop()
+
+# ---------------------------
+# Optional LLM refinement
+# ---------------------------
+topics = topics[: int(topic_limit)]
+
+if llm_instructions.strip():
+    if not OPENROUTER_API_KEY.strip():
+        st.warning("OPENROUTER_API_KEY manquant : aucun affinage LLM effectué.")
+    else:
+        with st.spinner("Affinage des sujets via LLM…"):
+            refined = refine_topics_with_llm(topics, llm_instructions, llm_model, int(topic_limit))
+            if refined:
+                topics = refined
 
 # ---------------------------
 # Output
