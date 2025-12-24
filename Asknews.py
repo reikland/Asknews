@@ -29,11 +29,9 @@ OPENROUTER_API_KEY = "sk-or-v1-b6661465ba07d4f93a3da120bed93d46eeeac7002308f4016
 # ============================================================
 class ArticleDoc(BaseModel):
     """Canonical article representation for topic clustering."""
+
     model_config = ConfigDict(extra="allow")
 
-
-@dataclass
-class ArticleDoc:
     title: Optional[str] = None
     headline: Optional[str] = None
     name: Optional[str] = None
@@ -73,7 +71,7 @@ class ArticleDoc:
             ):
                 if hasattr(item, field_name):
                     data[field_name] = getattr(item, field_name)
-        return cls(**data)
+        return cls.model_validate(data)
 
     def best_title(self) -> str:
         for v in (self.title, self.headline, self.name):
@@ -99,9 +97,6 @@ class ArticleDoc:
         if t and s:
             return f"{t}\n{s}"
         return t or s
-
-    def model_dump(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass
