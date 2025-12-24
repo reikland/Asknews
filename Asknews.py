@@ -1,5 +1,5 @@
+import argparse
 import csv
-import io
 import json
 import os
 import urllib.error
@@ -7,13 +7,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Iterable, List, Optional
 
-import streamlit as st
-
 ASKNEWS_API_KEY = os.getenv("ASKNEWS_API_KEY", "ank_tIpMbXiY2OSUWCU1RvO9IJkFbqVRUMO5HmNg2AGSjz")
-OPENROUTER_API_KEY = os.getenv(
-    "OPENROUTER_API_KEY",
-    "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",
-)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 
 ASKNEWS_TOPICS_URL = "https://api.asknews.app/v1/news/topics"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -157,7 +152,7 @@ def _http_request(url: str, method: str, headers: Optional[Dict[str, str]] = Non
         raise RuntimeError(f"Network error reaching {url}: {exc.reason}") from exc
 
 
-def build_csv(rows: List[Dict[str, str]], include_context: bool) -> str:
+def write_csv(rows: List[Dict[str, str]], output_file: str, include_context: bool) -> None:
     fieldnames = ["topic"]
     sample = rows[0] if rows else {}
     if "refined_topic" in sample:
@@ -167,72 +162,51 @@ def build_csv(rows: List[Dict[str, str]], include_context: bool) -> str:
     if "summary" in sample:
         fieldnames.append("summary")
 
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({key: row.get(key, "") for key in fieldnames})
-    return buffer.getvalue()
+    with open(output_file, "w", newline='', encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
-def render_app() -> None:
-    st.set_page_config(
-        page_title="AskNews Topic Generator", page_icon="📰", layout="wide"
-    )
-
-    st.title("AskNews Topic Generator")
-    st.caption(
-        "Générez des sujets AskNews depuis l'endpoint news/topics puis, au besoin, \n"
-        "raffinez-les avec un modèle hébergé via OpenRouter. Laissez le modèle vide pour \n"
-        "exporter les sujets bruts. Les clés API par défaut peuvent être remplacées par des\n"
-        " variables d'environnement."
-    )
-
-    with st.sidebar:
-        st.header("Paramètres")
-        count = st.number_input("Nombre de topics", min_value=1, max_value=100, value=10)
-        language = st.text_input("Langue (optionnel)", placeholder="ex: en, fr")
-        llm_model = st.text_input(
-            "Modèle OpenRouter (optionnel)",
-            help="Laisser vide pour éviter le raffinement. Exemple: openai/gpt-4o-mini",
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate news topics from AskNews and optionally refine them with an OpenRouter-hosted LLM."
         )
-        run_button = st.button("Générer les topics", type="primary")
+    )
+    parser.add_argument("count", type=int, help="Number of topics to retrieve from AskNews")
+    parser.add_argument(
+        "--language",
+        help="Optional language code for topics (if supported by AskNews)",
+    )
+    parser.add_argument(
+        "--llm-model",
+        dest="llm_model",
+        help="OpenRouter model to use for topic refinement (e.g., openai/gpt-4o-mini).",
+    )
+    parser.add_argument(
+        "--output",
+        default="topics.csv",
+        help="Path to the CSV file to generate (default: topics.csv)",
+    )
+    return parser.parse_args()
 
-    if not run_button:
-        st.info("Configurez les paramètres dans la barre latérale puis lancez la génération.")
-        return
 
-    try:
-        with st.spinner("Appel à AskNews..."):
-            topics = fetch_topics(int(count), language=language or None)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Erreur lors de la récupération des topics: {exc}")
-        return
+def main() -> None:
+    args = parse_args()
+    topics = fetch_topics(args.count, language=args.language)
 
-    include_context = False
-    rows: List[Dict[str, str]]
-    if llm_model.strip():
-        try:
-            with st.spinner("Raffinement via OpenRouter..."):
-                rows = refine_topics_with_llm(topics, llm_model.strip())
-                include_context = True
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Erreur lors du raffinement LLM: {exc}")
-            return
+    if args.llm_model:
+        rows = refine_topics_with_llm(topics, args.llm_model)
+        include_context = True
     else:
         rows = topics
+        include_context = False
 
-    st.subheader("Aperçu des résultats")
-    st.dataframe(rows, use_container_width=True)
-
-    csv_data = build_csv(rows, include_context)
-    st.download_button(
-        label="Télécharger en CSV",
-        data=csv_data,
-        file_name="asknews_topics.csv",
-        mime="text/csv",
-    )
+    write_csv(rows, args.output, include_context)
+    print(f"Saved {len(rows)} topic rows to {args.output}")
 
 
 if __name__ == "__main__":
-    render_app()
+    main()
