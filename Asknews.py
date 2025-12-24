@@ -1,5 +1,5 @@
-import argparse
 import csv
+import io
 import json
 import os
 import urllib.error
@@ -7,20 +7,28 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Iterable, List, Optional
 
-ASKNEWS_API_KEY = os.getenv("ASKNEWS_API_KEY", "ank_tIpMbXiY2OSUWCU1RvO9IJkFbqVRUMO5HmNg2AGSjz")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+import streamlit as st
+
+ASKNEWS_API_KEY = os.getenv("ASKNEWS_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 ASKNEWS_TOPICS_URL = "https://api.asknews.app/v1/news/topics"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-def fetch_topics(limit: int, language: Optional[str] = None) -> List[Dict[str, Any]]:
+def fetch_topics(
+    limit: int, language: Optional[str] = None, api_key: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    resolved_api_key = api_key or ASKNEWS_API_KEY
+    if not resolved_api_key:
+        raise ValueError("Missing AskNews API key")
+
     params: Dict[str, Any] = {"limit": limit}
     if language:
         params["language"] = language
 
     url = f"{ASKNEWS_TOPICS_URL}?{urllib.parse.urlencode(params)}"
-    headers = {"Authorization": f"Bearer {ASKNEWS_API_KEY}"}
+    headers = {"Authorization": f"Bearer {resolved_api_key}"}
 
     payload = _http_request(url, method="GET", headers=headers)
     if isinstance(payload, list):
@@ -68,9 +76,15 @@ def _first_value(source: Dict[str, Any], keys: List[str]) -> Optional[str]:
     return None
 
 
-def refine_topics_with_llm(topics: List[Dict[str, str]], model: str) -> List[Dict[str, str]]:
+def refine_topics_with_llm(
+    topics: List[Dict[str, str]], model: str, api_key: Optional[str] = None
+) -> List[Dict[str, str]]:
+    resolved_api_key = api_key or OPENROUTER_API_KEY
+    if not resolved_api_key:
+        raise ValueError("Missing OpenRouter API key")
+
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {resolved_api_key}",
         "Content-Type": "application/json",
     }
 
@@ -169,44 +183,87 @@ def write_csv(rows: List[Dict[str, str]], output_file: str, include_context: boo
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Generate news topics from AskNews and optionally refine them with an OpenRouter-hosted LLM."
+def build_csv_content(rows: List[Dict[str, str]], include_context: bool) -> str:
+    fieldnames = ["topic"]
+    sample = rows[0] if rows else {}
+    if "refined_topic" in sample:
+        fieldnames.append("refined_topic")
+    if include_context:
+        fieldnames.append("context")
+    if "summary" in sample:
+        fieldnames.append("summary")
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: row.get(key, "") for key in fieldnames})
+    return buffer.getvalue()
+
+
+def render_app() -> None:
+    st.set_page_config(page_title="AskNews Topic Explorer", page_icon="📰")
+
+    st.title("📰 AskNews Topic Explorer")
+    st.write(
+        "Générez rapidement des sujets d'actualité avec AskNews, puis affinez-les "
+        "avec un modèle hébergé sur OpenRouter. Fournissez vos clés API pour utiliser les services."
+    )
+
+    with st.sidebar:
+        st.header("Clés API")
+        asknews_key = st.text_input(
+            "AskNews API key", value=ASKNEWS_API_KEY or "", type="password"
         )
-    )
-    parser.add_argument("count", type=int, help="Number of topics to retrieve from AskNews")
-    parser.add_argument(
-        "--language",
-        help="Optional language code for topics (if supported by AskNews)",
-    )
-    parser.add_argument(
-        "--llm-model",
-        dest="llm_model",
-        help="OpenRouter model to use for topic refinement (e.g., openai/gpt-4o-mini).",
-    )
-    parser.add_argument(
-        "--output",
-        default="topics.csv",
-        help="Path to the CSV file to generate (default: topics.csv)",
-    )
-    return parser.parse_args()
+        openrouter_key = st.text_input(
+            "OpenRouter API key (pour l'affinage)",
+            value=OPENROUTER_API_KEY or "",
+            type="password",
+        )
+        st.caption(
+            "Les clés sont utilisées uniquement pendant cette session Streamlit et ne sont pas stockées."
+        )
 
+    st.subheader("Paramètres de récupération")
+    count = st.number_input("Nombre de sujets", min_value=1, max_value=50, value=10, step=1)
+    language = st.text_input("Langue (facultatif, ex: en, fr, es)")
 
-def main() -> None:
-    args = parse_args()
-    topics = fetch_topics(args.count, language=args.language)
+    st.subheader("Affinage optionnel par LLM")
+    llm_model = st.text_input(
+        "Modèle OpenRouter (ex: openai/gpt-4o-mini)",
+        help="Laisser vide pour ne pas affiner les sujets",
+    )
 
-    if args.llm_model:
-        rows = refine_topics_with_llm(topics, args.llm_model)
-        include_context = True
-    else:
-        rows = topics
-        include_context = False
+    if st.button("Générer les sujets", type="primary"):
+        try:
+            with st.spinner("Récupération des sujets AskNews..."):
+                topics = fetch_topics(
+                    int(count), language=language or None, api_key=asknews_key or None
+                )
 
-    write_csv(rows, args.output, include_context)
-    print(f"Saved {len(rows)} topic rows to {args.output}")
+            rows = topics
+            include_context = False
+
+            if llm_model.strip():
+                with st.spinner("Affinage via le modèle OpenRouter..."):
+                    rows = refine_topics_with_llm(
+                        topics, llm_model.strip(), api_key=openrouter_key or None
+                    )
+                include_context = True
+
+            st.success(f"{len(rows)} sujets prêts.")
+            st.dataframe(rows, use_container_width=True)
+
+            csv_content = build_csv_content(rows, include_context)
+            st.download_button(
+                "Télécharger en CSV",
+                data=csv_content.encode("utf-8"),
+                file_name="topics.csv",
+                mime="text/csv",
+            )
+        except Exception as exc:  # pragma: no cover - surfaced in UI
+            st.error(str(exc))
 
 
 if __name__ == "__main__":
-    main()
+    render_app()
