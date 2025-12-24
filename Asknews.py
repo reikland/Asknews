@@ -26,6 +26,9 @@ OPENROUTER_API_KEY = "sk-or-v1-b6661465ba07d4f93a3da120bed93d46eeeac7002308f4016
 # ============================================================
 # Simple data classes (no external deps)
 # ============================================================
+class ArticleDoc(BaseModel):
+    """Canonical article representation for topic clustering."""
+    model_config = ConfigDict(extra="allow")
 
 
 @dataclass
@@ -424,6 +427,11 @@ def validate_articles(raw_items: Sequence[Any]) -> List[ArticleDoc]:
                 continue
             item = candidate
         doc = ArticleDoc.from_any(item)
+        try:
+            doc = ArticleDoc.model_validate(item, from_attributes=True)
+        except Exception:
+            # If an item is already a dict-like, allow it as input.
+            doc = ArticleDoc.model_validate(item)
         # keep only usable docs
         if doc.best_title() or doc.best_summary():
             docs.append(doc)
